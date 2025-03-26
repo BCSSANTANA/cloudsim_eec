@@ -9,6 +9,7 @@
 
 static bool migrating = false;
 static unsigned active_machines = 16;
+unsigned total_machines;
 
 void Scheduler::Init() {
     // Find the parameters of the clusters
@@ -21,15 +22,19 @@ void Scheduler::Init() {
     // 
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
-    for(unsigned i = 0; i < active_machines; i++)
-        vms.push_back(VM_Create(LINUX, X86));
-    for(unsigned i = 0; i < active_machines; i++) {
+    total_machines = Machine_GetTotal();
+    
+    for(unsigned i = 0; i < total_machines; i++) {
+        MachineInfo_t machine = Machine_GetInfo(MachineId_t(i));
         machines.push_back(MachineId_t(i));
-    }    
-    for(unsigned i = 0; i < active_machines; i++) {
-        VM_Attach(vms[i], machines[i]);
+        for (unsigned j = 0; j < machine.num_cpus; j++) { //number of cpus does not hard limit how many VMs we can create but is probably a good number to start with
+            VMId_t vm = VM_Create(LINUX, machine.cpu);
+            vms.push_back(vm);
+            VM_Attach(vm, machines[i]);
+        }
     }
-
+    
+    /*
     bool dynamic = false;
     if(dynamic)
         for(unsigned i = 0; i<4 ; i++)
@@ -38,7 +43,7 @@ void Scheduler::Init() {
     // Turn off the ARM machines
     for(unsigned i = 24; i < Machine_GetTotal(); i++)
         Machine_SetState(MachineId_t(i), S5);
-
+    */
     SimOutput("Scheduler::Init(): VM ids are " + to_string(vms[0]) + " and " + to_string(vms[1]), 3);
 }
 
@@ -64,13 +69,31 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     // Turn on a machine, migrate an existing VM from a loaded machine....
     //
     // Other possibilities as desired
-    Priority_t priority = (task_id == 0 || task_id == 64)? HIGH_PRIORITY : MID_PRIORITY;
-    if(migrating) {
-        VM_AddTask(vms[0], task_id, priority);
+    VMType_t required_vmType = RequiredVMType(task_id);
+    CPUType_t required_cpuType = RequiredCPUType(task_id);
+    for (VMId_t vm : vms) {
+        VMInfo_t vm_info = VM_GetInfo(vm);
+        MachineInfo_t machine_info = Machine_GetInfo(vm_info.machine_id);
+        if (required_cpuType == vm_info.cpu && required_vmType == vm_info.vm_type && machine_info.memory_size - machine_info.memory_used >= GetTaskInfo(task_id).required_memory) {
+            VM_AddTask(vm, task_id, LOW_PRIORITY);
+        }
+    } //did not find an existing VM that met our requirements
+    MachineId_t least_full_machine;
+    unsigned lowest_used_mem = 9999999; //need to fix this to a number that makes sense
+    for (MachineId_t machine : machines) {
+        unsigned used_mem = Machine_GetInfo(machine).memory_used;
+        if (used_mem < lowest_used_mem) {
+            least_full_machine = machine;
+        }
     }
-    else {
-        VM_AddTask(vms[task_id % active_machines], task_id, priority);
-    }// Skeleton code, you need to change it according to your algorithm
+    if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used > 8) {
+        VMId_t new_vm = VM_Create(LINUX, required_cpuType); //overflow from creating a VM on a machine that doesn't have space?
+        vms.push_back(new_vm);
+        VM_Attach(new_vm, least_full_machine);
+        if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used >= GetTaskInfo(task_id).required_memory) {
+            VM_AddTask(new_vm, task_id, LOW_PRIORITY);
+        }
+    }
 }
 
 void Scheduler::PeriodicCheck(Time_t now) {
