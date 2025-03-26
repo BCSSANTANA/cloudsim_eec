@@ -69,31 +69,38 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     // Turn on a machine, migrate an existing VM from a loaded machine....
     //
     // Other possibilities as desired
+    bool taskAssigned = false;
     VMType_t required_vmType = RequiredVMType(task_id);
     CPUType_t required_cpuType = RequiredCPUType(task_id);
     for (VMId_t vm : vms) {
         VMInfo_t vm_info = VM_GetInfo(vm);
         MachineInfo_t machine_info = Machine_GetInfo(vm_info.machine_id);
         if (required_cpuType == vm_info.cpu && required_vmType == vm_info.vm_type && machine_info.memory_size - machine_info.memory_used >= GetTaskInfo(task_id).required_memory) {
-            VM_AddTask(vm, task_id, LOW_PRIORITY);
+            VM_AddTask(vm, task_id, HIGH_PRIORITY);
+            taskAssigned = true;
+            break;
         }
     } //did not find an existing VM that met our requirements
-    MachineId_t least_full_machine;
-    unsigned lowest_used_mem = 9999999; //need to fix this to a number that makes sense
-    for (MachineId_t machine : machines) {
-        unsigned used_mem = Machine_GetInfo(machine).memory_used;
-        if (used_mem < lowest_used_mem) {
-            least_full_machine = machine;
+    if (!taskAssigned) {
+        MachineId_t least_full_machine;
+        unsigned lowest_used_mem = 9999999; //need to fix this to a number that makes sense
+        for (MachineId_t machine : machines) {
+            unsigned used_mem = Machine_GetInfo(machine).memory_used;
+            if (used_mem < lowest_used_mem) {
+                least_full_machine = machine;
+                lowest_used_mem = used_mem;
+            }
+        }
+        if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used > 100) {
+            VMId_t new_vm = VM_Create(LINUX, required_cpuType); //overflow from creating a VM on a machine that doesn't have space?
+            vms.push_back(new_vm);
+            VM_Attach(new_vm, least_full_machine);
+            if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used >= GetTaskInfo(task_id).required_memory) {
+                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            }
         }
     }
-    if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used > 8) {
-        VMId_t new_vm = VM_Create(LINUX, required_cpuType); //overflow from creating a VM on a machine that doesn't have space?
-        vms.push_back(new_vm);
-        VM_Attach(new_vm, least_full_machine);
-        if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used >= GetTaskInfo(task_id).required_memory) {
-            VM_AddTask(new_vm, task_id, LOW_PRIORITY);
-        }
-    }
+    //still a possibility that a task isn't being added to a vm?
 }
 
 void Scheduler::PeriodicCheck(Time_t now) {
