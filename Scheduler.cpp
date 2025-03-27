@@ -6,10 +6,39 @@
 //
 
 #include "Scheduler.hpp"
+#include <queue>
+#include <vector>
 
 static bool migrating = false;
 static unsigned active_machines = 16;
 unsigned total_machines;
+
+// Custom comparator for VMs based on the number of active tasks.
+struct VMComparator {
+    bool operator()(const VMId_t& a, const VMId_t& b) const {
+        // Retrieve the VM info for both VMs.
+        VMInfo_t infoA = VM_GetInfo(a);
+        VMInfo_t infoB = VM_GetInfo(b);
+        
+        // Calculate total workload for each VM (using remaining instructions as an example).
+        unsigned workloadA = 0;
+        for (TaskId_t task : infoA.active_tasks) {
+            TaskInfo_t taskInfo = GetTaskInfo(task);
+            workloadA += taskInfo.remaining_instructions;  // or total_instructions, depending on your strategy
+        }
+        
+        unsigned workloadB = 0;
+        for (TaskId_t task : infoB.active_tasks) {
+            TaskInfo_t taskInfo = GetTaskInfo(task);
+            workloadB += taskInfo.remaining_instructions;
+        }
+        
+        // We want the VM with lower total workload to have higher priority (min-heap).
+        return workloadA > workloadB;
+    }
+};
+
+std::priority_queue<VMId_t, std::vector<VMId_t>, VMComparator> vmQueue;
 
 void Scheduler::Init() {
     // Find the parameters of the clusters
@@ -23,16 +52,23 @@ void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
     total_machines = Machine_GetTotal();
-    
     for(unsigned i = 0; i < total_machines; i++) {
-        MachineInfo_t machine = Machine_GetInfo(MachineId_t(i));
+        MachineInfo_t machine_info = Machine_GetInfo(MachineId_t(i));
+        for (unsigned k = 0; k < machine_info.num_cpus; k++) { //does this make a difference?
+            Machine_SetCorePerformance(MachineId_t(i), k, CPUPerformance_t(P0)); 
+        }
         machines.push_back(MachineId_t(i));
-        for (unsigned j = 0; j < machine.num_cpus; j++) { //number of cpus does not hard limit how many VMs we can create but is probably a good number to start with
-            VMId_t vm = VM_Create(LINUX, machine.cpu);
+        for (unsigned j = 0; j < machine_info.num_cpus; j++) { 
+            VMId_t vm = VM_Create(LINUX, machine_info.cpu);
             vms.push_back(vm);
             VM_Attach(vm, machines[i]);
         }
     }
+
+    for (VMId_t vm : vms) {
+        vmQueue.push(vm);
+    }
+
     
     /*
     bool dynamic = false;
@@ -70,37 +106,59 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     //
     // Other possibilities as desired
     bool taskAssigned = false;
+    TaskInfo_t taskInfo = GetTaskInfo(task_id);
+    Priority_t prio;
+    if (taskInfo.required_sla == SLA0) {
+        prio = HIGH_PRIORITY;
+    }
+    else if (taskInfo.required_sla == SLA3) {
+        prio = LOW_PRIORITY;
+    }
+    else {
+        prio = MID_PRIORITY;
+    }
     VMType_t required_vmType = RequiredVMType(task_id);
     CPUType_t required_cpuType = RequiredCPUType(task_id);
+    while (!vmQueue.empty()) {
+        vmQueue.pop();
+    }
+    // Re-push all VMs so that the queue is sorted by the current active task counts.
     for (VMId_t vm : vms) {
-        VMInfo_t vm_info = VM_GetInfo(vm);
-        MachineInfo_t machine_info = Machine_GetInfo(vm_info.machine_id);
-        if (required_cpuType == vm_info.cpu && required_vmType == vm_info.vm_type && machine_info.memory_size - machine_info.memory_used >= GetTaskInfo(task_id).required_memory) {
-            VM_AddTask(vm, task_id, HIGH_PRIORITY);
+        vmQueue.push(vm);
+    }
+    //make a prio queue of VMs based on number of active tasks
+    if (!vmQueue.empty()) {
+        // The top of the queue is the least busy VM.
+        VMId_t bestVM = vmQueue.top();
+        try {
+            VM_AddTask(bestVM, task_id, prio);
             taskAssigned = true;
-            break;
+            SimOutput("Added task " + to_string(task_id) + " to existing VM ", 1);
+        } catch (const std::exception &e) {
+            SimOutput("Failed to add task " + to_string(task_id) + " to VM " +
+                      to_string(bestVM) + ": " + e.what(), 1);
         }
-    } //did not find an existing VM that met our requirements
+    }
     if (!taskAssigned) {
         MachineId_t least_full_machine;
-        unsigned lowest_used_mem = 9999999; //need to fix this to a number that makes sense
+        unsigned lowest_used_mem;
         for (MachineId_t machine : machines) {
-            unsigned used_mem = Machine_GetInfo(machine).memory_used;
+            unsigned used_mem = Machine_GetInfo(machine).active_vms; //should we go based on active vms or memory?
             if (used_mem < lowest_used_mem) {
                 least_full_machine = machine;
                 lowest_used_mem = used_mem;
             }
         }
-        if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used > 100) {
-            VMId_t new_vm = VM_Create(LINUX, required_cpuType); //overflow from creating a VM on a machine that doesn't have space?
+        if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used > 100 && Machine_GetInfo(least_full_machine).cpu == required_cpuType) {
+            VMId_t new_vm = VM_Create(LINUX, required_cpuType); //overflow from creating a VM on a machine that doesn't have space? creates problems trying to create a cputype on a machine that doesn't have that?
             vms.push_back(new_vm);
             VM_Attach(new_vm, least_full_machine);
             if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used >= GetTaskInfo(task_id).required_memory) {
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+                VM_AddTask(new_vm, task_id, prio);
+                taskAssigned = true;
             }
         }
     }
-    //still a possibility that a task isn't being added to a vm?
 }
 
 void Scheduler::PeriodicCheck(Time_t now) {
@@ -126,6 +184,14 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Do any bookkeeping necessary for the data structures
     // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
     // This is an opportunity to make any adjustments to optimize performance/energy
+    // Clear the current priority queue
+    while (!vmQueue.empty()) {
+        vmQueue.pop();
+    }
+    // Re-push all VMs so that the queue is sorted by the current active task counts.
+    for (VMId_t vm : vms) {
+        vmQueue.push(vm);
+    }
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
 }
 
