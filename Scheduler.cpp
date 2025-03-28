@@ -13,7 +13,7 @@ static bool migrating = false;
 static unsigned active_machines = 16;
 unsigned total_machines;
 
-// Custom comparator for VMs based on the number of active tasks.
+// Custom comparator for VMs based on its total workload.
 struct VMComparator {
     bool operator()(const VMId_t& a, const VMId_t& b) const {
         // Retrieve the VM info for both VMs.
@@ -232,10 +232,12 @@ void SchedulerCheck(Time_t time) {
     Scheduler.PeriodicCheck(time);
     static unsigned counts = 0;
     counts++;
+    /*
     if(counts == 10) {
         migrating = true;
         VM_Migrate(1, 9);
     }
+    */
 }
 
 void SimulationComplete(Time_t time) {
