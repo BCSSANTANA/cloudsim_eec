@@ -10,7 +10,7 @@
 #include <vector>
 
 static bool migrating = false;
-static unsigned active_machines = 16;
+unsigned active_machines;
 unsigned total_machines;
 
 // Custom comparator for VMs based on its total workload.
@@ -54,7 +54,7 @@ void Scheduler::Init() {
     total_machines = Machine_GetTotal();
     for(unsigned i = 0; i < total_machines; i++) {
         MachineInfo_t machine_info = Machine_GetInfo(MachineId_t(i));
-        for (unsigned k = 0; k < machine_info.num_cpus; k++) { //does this make a difference?
+        for (unsigned k = 0; k < machine_info.num_cpus; k++) { 
             Machine_SetCorePerformance(MachineId_t(i), k, CPUPerformance_t(P0)); 
         }
         machines.push_back(MachineId_t(i));
@@ -68,8 +68,6 @@ void Scheduler::Init() {
     for (VMId_t vm : vms) {
         vmQueue.push(vm);
     }
-
-    
     /*
     bool dynamic = false;
     if(dynamic)
@@ -80,7 +78,9 @@ void Scheduler::Init() {
     for(unsigned i = 24; i < Machine_GetTotal(); i++)
         Machine_SetState(MachineId_t(i), S5);
     */
+    active_machines = Machine_GetTotal();
     SimOutput("Scheduler::Init(): VM ids are " + to_string(vms[0]) + " and " + to_string(vms[1]), 3);
+    SimOutput("Scheduler::Init(): Total number of active machines is " + to_string(active_machines), 1);
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
@@ -105,6 +105,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     // Turn on a machine, migrate an existing VM from a loaded machine....
     //
     // Other possibilities as desired
+
     bool taskAssigned = false;
     TaskInfo_t taskInfo = GetTaskInfo(task_id);
     Priority_t prio;
@@ -131,6 +132,13 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         // The top of the queue is the least busy VM.
         VMId_t bestVM = vmQueue.top();
         try {
+            VMInfo_t vm_info = VM_GetInfo(bestVM);
+            MachineInfo_t machine_info = Machine_GetInfo(Machine_GetInfo(vm_info.machine_id).machine_id);
+            if (machine_info.s_state == S5) {
+                Machine_SetState(machine_info.machine_id, S0);
+                active_machines++;
+                SimOutput("Scheduler::NewTask(): Machine " + to_string(machine_info.machine_id) + " is turned on at time " + to_string(now), 4);
+            }
             VM_AddTask(bestVM, task_id, prio);
             taskAssigned = true;
             SimOutput("Added task " + to_string(task_id) + " to existing VM ", 1);
@@ -149,7 +157,8 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
                 lowest_used_mem = used_mem;
             }
         }
-        if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used > 100 && Machine_GetInfo(least_full_machine).cpu == required_cpuType) {
+        MachineInfo_t least_full_machine_info = Machine_GetInfo(least_full_machine);
+        if (least_full_machine_info.memory_size - least_full_machine_info.memory_used > 100 && least_full_machine_info.cpu == required_cpuType) {
             VMId_t new_vm = VM_Create(LINUX, required_cpuType); //overflow from creating a VM on a machine that doesn't have space? creates problems trying to create a cputype on a machine that doesn't have that?
             vms.push_back(new_vm);
             VM_Attach(new_vm, least_full_machine);
@@ -191,6 +200,16 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Re-push all VMs so that the queue is sorted by the current active task counts.
     for (VMId_t vm : vms) {
         vmQueue.push(vm);
+        
+    }
+    for (MachineId_t machine : machines) {
+        MachineInfo_t machine_info = Machine_GetInfo(machine);
+        unsigned active_tasks = machine_info.active_tasks;
+        if (active_tasks == 0) {
+            Machine_SetState(machine, S5);
+            active_machines--;
+            SimOutput("Scheduler::PeriodicCheck(): Machine " + to_string(machine) + " is turnedmachine_get off at time " + to_string(now), 4);
+        }
     }
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
 }
@@ -229,15 +248,12 @@ void MigrationDone(Time_t time, VMId_t vm_id) {
 void SchedulerCheck(Time_t time) {
     // This function is called periodically by the simulator, no specific event
     SimOutput("SchedulerCheck(): SchedulerCheck() called at " + to_string(time), 4);
-    Scheduler.PeriodicCheck(time);
     static unsigned counts = 0;
     counts++;
-    /*
-    if(counts == 10) {
-        migrating = true;
-        VM_Migrate(1, 9);
+    if (counts == 10) {
+        Scheduler.PeriodicCheck(time);
+
     }
-    */
 }
 
 void SimulationComplete(Time_t time) {
