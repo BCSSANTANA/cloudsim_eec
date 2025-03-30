@@ -8,164 +8,142 @@
 #include "Scheduler.hpp"
 #include <queue>
 #include <vector>
+#include <algorithm>
+#include <climits>
 
 static bool migrating = false;
-static unsigned active_machines = 16;
+static unsigned active_machines;
 unsigned total_machines;
 
-// Custom comparator for VMs based on its total workload.
-struct VMComparator {
-    bool operator()(const VMId_t& a, const VMId_t& b) const {
-        // Retrieve the VM info for both VMs.
-        VMInfo_t infoA = VM_GetInfo(a);
-        VMInfo_t infoB = VM_GetInfo(b);
-        
-        // Calculate total workload for each VM (using remaining instructions as an example).
-        unsigned workloadA = 0;
-        for (TaskId_t task : infoA.active_tasks) {
-            TaskInfo_t taskInfo = GetTaskInfo(task);
-            workloadA += taskInfo.remaining_instructions;  // or total_instructions, depending on your strategy
-        }
-        
-        unsigned workloadB = 0;
-        for (TaskId_t task : infoB.active_tasks) {
-            TaskInfo_t taskInfo = GetTaskInfo(task);
-            workloadB += taskInfo.remaining_instructions;
-        }
-        
-        // We want the VM with lower total workload to have higher priority (min-heap).
-        return workloadA > workloadB;
+// Helper structure for sorting machines by energy consumption (lowest first)
+struct MachineEnergyComparator {
+    bool operator()(const MachineId_t &a, const MachineId_t &b) const {
+        return Machine_GetEnergy(a) < Machine_GetEnergy(b);
     }
 };
 
-std::priority_queue<VMId_t, std::vector<VMId_t>, VMComparator> vmQueue;
+// Global sorted list of machines by energy consumption.
+std::vector<MachineId_t> sortedMachines;
 
 void Scheduler::Init() {
-    // Find the parameters of the clusters
-    // Get the total number of machines
-    // For each machine:
-    //      Get the type of the machine
-    //      Get the memory of the machine
-    //      Get the number of CPUs
-    //      Get if there is a GPU or not
-    // 
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
     total_machines = Machine_GetTotal();
-    for(unsigned i = 0; i < total_machines; i++) {
+    active_machines = total_machines;
+    
+    // Build the machines vector and also set up each machine's cores.
+    for (unsigned i = 0; i < total_machines; i++) {
         MachineInfo_t machine_info = Machine_GetInfo(MachineId_t(i));
-        for (unsigned k = 0; k < machine_info.num_cpus; k++) { //does this make a difference?
-            Machine_SetCorePerformance(MachineId_t(i), k, CPUPerformance_t(P0)); 
+        // not sure this does anything, but might as well
+        for (unsigned k = 0; k < machine_info.num_cpus; k++) {
+            Machine_SetCorePerformance(MachineId_t(i), k, P0);
         }
         machines.push_back(MachineId_t(i));
-        for (unsigned j = 0; j < machine_info.num_cpus; j++) { 
+    }
+    
+    // Sort machines by energy consumption (lowest first)
+    sortedMachines = machines;
+    std::sort(sortedMachines.begin(), sortedMachines.end(), MachineEnergyComparator());
+    
+    // Pre-provision a number of VMs per machine.
+    // Create one VM for every CPU, not sure if that's a good policy but it's a policy
+    for (MachineId_t m : sortedMachines) {
+        MachineInfo_t machine_info = Machine_GetInfo(m);
+        unsigned numVMs = machine_info.num_cpus;
+        for (unsigned j = 0; j < numVMs; j++) {
             VMId_t vm = VM_Create(LINUX, machine_info.cpu);
             vms.push_back(vm);
-            VM_Attach(vm, machines[i]);
+            VM_Attach(vm, m);
         }
     }
-
-    for (VMId_t vm : vms) {
-        vmQueue.push(vm);
-    }
-
     
-    /*
-    bool dynamic = false;
-    if(dynamic)
-        for(unsigned i = 0; i<4 ; i++)
-            for(unsigned j = 0; j < 8; j++)
-                Machine_SetCorePerformance(MachineId_t(0), j, P3);
-    // Turn off the ARM machines
-    for(unsigned i = 24; i < Machine_GetTotal(); i++)
-        Machine_SetState(MachineId_t(i), S5);
-    */
-    SimOutput("Scheduler::Init(): VM ids are " + to_string(vms[0]) + " and " + to_string(vms[1]), 3);
+    SimOutput("Scheduler::Init(): Initialized " + to_string(vms.size()) + " VMs across " + to_string(total_machines) + " machines.", 3);
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
-    // Update your data structure. The VM now can receive new tasks
+    SimOutput("Scheduler::MigrationComplete(): VM " + to_string(vm_id) +
+              " migration completed at time " + to_string(time), 3);
+    
 }
 
+//ChatGPT helped fill in the gaps not covered in the class slides
+//Also important to note that our pmapper differs from the class slides because it does not attempt to shutdown any machines since there was no policy mentioned for bringing them back up when needed (and its more interesting to compare the energy use to other algos if its migrating tasks all the time)
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
-    // Get the task parameters
-    //  IsGPUCapable(task_id);
-    //  GetMemory(task_id);
-    //  RequiredVMType(task_id);
-    //  RequiredSLA(task_id);
-    //  RequiredCPUType(task_id);
-    // Decide to attach the task to an existing VM, 
-    //      vm.AddTask(taskid, Priority_T priority); or
-    // Create a new VM, attach the VM to a machine
-    //      VM vm(type of the VM)
-    //      vm.Attach(machine_id);
-    //      vm.AddTask(taskid, Priority_t priority) or
-    // Turn on a machine, create a new VM, attach it to the VM, then add the task
-    //
-    // Turn on a machine, migrate an existing VM from a loaded machine....
-    //
-    // Other possibilities as desired
     bool taskAssigned = false;
     TaskInfo_t taskInfo = GetTaskInfo(task_id);
-    Priority_t prio;
-    if (taskInfo.required_sla == SLA0) {
-        prio = HIGH_PRIORITY;
-    }
-    else if (taskInfo.required_sla == SLA3) {
-        prio = LOW_PRIORITY;
-    }
-    else {
-        prio = MID_PRIORITY;
-    }
-    VMType_t required_vmType = RequiredVMType(task_id);
-    CPUType_t required_cpuType = RequiredCPUType(task_id);
-    while (!vmQueue.empty()) {
-        vmQueue.pop();
-    }
-    // Re-push all VMs so that the queue is sorted by the current active task counts.
-    for (VMId_t vm : vms) {
-        vmQueue.push(vm);
-    }
-    //make a prio queue of VMs based on number of active tasks
-    if (!vmQueue.empty()) {
-        // The top of the queue is the least busy VM.
-        VMId_t bestVM = vmQueue.top();
-        try {
-            VM_AddTask(bestVM, task_id, prio);
-            taskAssigned = true;
-            SimOutput("Added task " + to_string(task_id) + " to existing VM ", 1);
-        } catch (const std::exception &e) {
-            SimOutput("Failed to add task " + to_string(task_id) + " to VM " +
-                      to_string(bestVM) + ": " + e.what(), 1);
+    Priority_t prio = (taskInfo.required_sla == SLA0) ? HIGH_PRIORITY :
+                      (taskInfo.required_sla == SLA3) ? LOW_PRIORITY : MID_PRIORITY;
+    
+    // pMapper: assign tasks based on machines sorted by energy consumption.
+    // Iterate over sortedMachines to find the first machine that can take the task.
+    for (MachineId_t m : sortedMachines) {
+        MachineInfo_t mInfo = Machine_GetInfo(m);
+
+        if (mInfo.cpu != taskInfo.required_cpu)
+            continue;
+
+        // Skip machines that are not active.
+        if (mInfo.s_state == S5)
+            continue;
+
+        // Check if the machine has enough free memory for this task.
+        if (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory) {
+            // Try to find a VM on this machine with capacity.
+            bool foundVM = false;
+            for (VMId_t vm : vms) {
+                VMInfo_t vmInfo = VM_GetInfo(vm);
+                if (vmInfo.machine_id == m && 
+                    (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory)) {
+                    try {
+                        VM_AddTask(vm, task_id, prio);
+                        taskAssigned = true;
+                        foundVM = true;
+                        SimOutput("NewTask(): Assigned task " + to_string(task_id) + " to VM " + to_string(vm) + " on machine " + to_string(m), 1);
+                        break;
+                    } catch (const std::exception &e) {
+                        // If VM not ready, try next one.
+                        SimOutput("NewTask(): Failed to add task " + to_string(task_id) + " to VM " + to_string(vm) + ": " + e.what(), 1);
+                    }
+                }
+            }
+            if (!foundVM) {
+                // No existing VM on machine m can take the task, try to create one if possible.
+                if (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory + VM_MEMORY_OVERHEAD) {
+                    VMId_t new_vm = VM_Create(LINUX, mInfo.cpu);
+                    vms.push_back(new_vm);
+                    VM_Attach(new_vm, m);
+                    try {
+                        VM_AddTask(new_vm, task_id, prio);
+                        taskAssigned = true;
+                        SimOutput("NewTask(): Created new VM " + to_string(new_vm) + " on machine " + to_string(m) + " and assigned task " + to_string(task_id), 1);
+                    } catch (const std::exception &e) {
+                        SimOutput("NewTask(): Failed to add task " + to_string(task_id) + " to new VM: " + e.what(), 1);
+                    }
+                    break; // Exit after trying one machine.
+                }
+            }
+            if (taskAssigned) break;
         }
     }
+    
     if (!taskAssigned) {
-        MachineId_t least_full_machine;
-        unsigned lowest_used_mem;
-        for (MachineId_t machine : machines) {
-            unsigned used_mem = Machine_GetInfo(machine).active_vms; //should we go based on active vms or memory?
-            if (used_mem < lowest_used_mem) {
-                least_full_machine = machine;
-                lowest_used_mem = used_mem;
-            }
-        }
-        if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used > 100 && Machine_GetInfo(least_full_machine).cpu == required_cpuType) {
-            VMId_t new_vm = VM_Create(LINUX, required_cpuType); //overflow from creating a VM on a machine that doesn't have space? creates problems trying to create a cputype on a machine that doesn't have that?
-            vms.push_back(new_vm);
-            VM_Attach(new_vm, least_full_machine);
-            if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used >= GetTaskInfo(task_id).required_memory) {
-                VM_AddTask(new_vm, task_id, prio);
-                taskAssigned = true;
-            }
-        }
+        SimOutput("NewTask(): FAILED to assign Task " + to_string(task_id) + " -- SLA violation", 1);
     }
 }
 
+
 void Scheduler::PeriodicCheck(Time_t now) {
-    // This method should be called from SchedulerCheck()
-    // SchedulerCheck is called periodically by the simulator to allow you to monitor, make decisions, adjustments, etc.
-    // Unlike the other invocations of the scheduler, this one doesn't report any specific event
-    // Recommendation: Take advantage of this function to do some monitoring and adjustments as necessary
+    // Monitor and log overall machine utilization.
+    double totalUtilization = 0;
+    for (MachineId_t m : machines) {
+        MachineInfo_t mInfo = Machine_GetInfo(m);
+        if (mInfo.s_state == S5)
+            continue;
+        double utilization = double(mInfo.memory_used) / mInfo.memory_size;
+        totalUtilization += utilization;
+    }
+    double avgUtilization = totalUtilization / machines.size();
+    SimOutput("PeriodicCheck(): Average machine utilization: " + to_string(avgUtilization), 3);
 }
 
 void Scheduler::Shutdown(Time_t time) {
@@ -180,19 +158,67 @@ void Scheduler::Shutdown(Time_t time) {
     SimOutput("SimulationComplete(): Time is " + to_string(time), 4);
 }
 
+//ChatGPT helped fill in the gaps not covered in the class slides
 void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
-    // Do any bookkeeping necessary for the data structures
-    // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
-    // This is an opportunity to make any adjustments to optimize performance/energy
-    // Clear the current priority queue
-    while (!vmQueue.empty()) {
-        vmQueue.pop();
-    }
-    // Re-push all VMs so that the queue is sorted by the current active task counts.
-    for (VMId_t vm : vms) {
-        vmQueue.push(vm);
-    }
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
+    
+    // pMapper rebalancing upon workload completion:
+    // 1. Compute utilization for each machine (utilization = memory_used / memory_size since not really defined)
+    std::vector<std::pair<MachineId_t, double>> machineUtil;
+    for (MachineId_t m : machines) {
+        MachineInfo_t mInfo = Machine_GetInfo(m);
+        if (mInfo.s_state == S5)
+            continue;
+        double utilization = double(mInfo.memory_used) / mInfo.memory_size;
+        machineUtil.push_back(std::make_pair(m, utilization));
+    }
+    
+    // 2. Sort machines by utilization
+    std::sort(machineUtil.begin(), machineUtil.end(), [](const auto &a, const auto &b) {
+        return a.second < b.second;
+    });
+    
+    // Divide machines into two halves:
+    size_t midIndex = machineUtil.size() / 2;
+    std::vector<MachineId_t> lowUtilMachines, highUtilMachines;
+    for (size_t i = 0; i < machineUtil.size(); i++) {
+        if (i < midIndex)
+            lowUtilMachines.push_back(machineUtil[i].first);
+        else
+            highUtilMachines.push_back(machineUtil[i].first);
+    }
+    
+    // 3. From the least utilized machine, select the smallest workload (by remaining instructions)
+    VMId_t candidateVM = 0;
+    TaskId_t candidateTask = 0;
+    unsigned minWorkload = UINT_MAX;
+    for (MachineId_t m : lowUtilMachines) {
+        for (VMId_t vm : vms) {
+            VMInfo_t vmInfo = VM_GetInfo(vm);
+            if (vmInfo.machine_id == m && !vmInfo.active_tasks.empty()) {
+                for (TaskId_t t : vmInfo.active_tasks) {
+                    TaskInfo_t tInfo = GetTaskInfo(t);
+                    if (tInfo.remaining_instructions < minWorkload) {
+                        minWorkload = tInfo.remaining_instructions;
+                        candidateTask = t;
+                        candidateVM = vm;
+                    }
+                }
+            }
+        }
+    }
+    
+    // 4. Migrate the candidate workload to one of the highly utilized machines to consolidate load (I think this step and the overhead of migration is what's slowing this algo down, but that's pmapper!)
+    if (candidateTask != 0 && !highUtilMachines.empty()) {
+        MachineId_t targetMachine = highUtilMachines.front();
+        try {
+            // Migrate the VM that is hosting candidateTask to the target machine.
+            VM_Migrate(candidateVM, targetMachine);
+            SimOutput("TaskComplete(): Migrated VM " + to_string(candidateVM) + " (carrying task " + to_string(candidateTask) + ") to machine " + to_string(targetMachine), 1);
+        } catch (const std::exception &e) {
+            SimOutput("TaskComplete(): Migration failed: " + string(e.what()), 1);
+        }
+    }
 }
 
 // Public interface below
