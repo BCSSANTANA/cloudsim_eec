@@ -28,9 +28,7 @@ void Scheduler::Init() {
     for (unsigned i = 0; i < total_machines; i++) {  
         MachineId_t m = MachineId_t(i);
         Machine_SetState(m, S0);
-        machines.push_back(m);
-        inactive_machines.push_back(m);
-    }
+        machines.push_back(m);    }
     SimOutput("Scheduler::Init(): Total number of active machines is: " + to_string(active_machines), 1);
 }
 
@@ -41,61 +39,78 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 
 
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
-    // Get the task parameters
-    //  IsGPUCapable(task_id);
-    //  GetMemory(task_id);
-    //  RequiredVMType(task_id);
-    //  RequiredSLA(task_id);
-    //  RequiredCPUType(task_id);
-    // Decide to attach the task to an existing VM, 
-    //      vm.AddTask(taskid, Priority_T priority); or
-    // Create a new VM, attach the VM to a machine
-    //      VM vm(type of the VM)
-    //      vm.Attach(machine_id);
-    //      vm.AddTask(taskid, Priority_t priority) or
-    // Turn on a machine, create a new VM, attach it to the VM, then add the task
-    //
-    // Turn on a machine, migrate an existing VM from a loaded machine....
-    //
-    // Other possibilities as desired
-
-    bool found_vm = false;
-    bool task_added = false;
     TaskInfo_t taskInfo = GetTaskInfo(task_id);
-
-    // only one task per VM so HIGH_PRIORITY is assigned
     
-    Priority_t prio = HIGH_PRIORITY;
+    // only one task per VM so HIGH_PRIORITY is assigned
+
+    Priority_t prio = LOW_PRIORITY;
+    if (taskInfo.required_sla == SLA0) {
+        prio = HIGH_PRIORITY;
+    }
+    else if (taskInfo.required_sla == SLA3) {
+        prio = LOW_PRIORITY;
+    }
+    else {
+        prio = MID_PRIORITY;
+    }
     CPUType_t required_cpu = taskInfo.required_cpu;
     VMType_t required_vm = taskInfo.required_vm;
     unsigned required_memory = taskInfo.required_memory;
+    bool task_added = false;
+    
+    // Iterate and find a matching VM and Machine.
+    for (VMId_t vm : vms) {
+        VMInfo_t vm_info = VM_GetInfo(vm);
+        if (vm_info.vm_type == required_vm && vm_info.cpu == required_cpu) {
+            // Check usage in the machine it refers to
+            MachineId_t machine = vm_info.machine_id;
+            MachineInfo_t machine_info = Machine_GetInfo(machine);
+            MachineState_t machine_state = machine_info.s_state;
+            if (machine_info.memory_used  + required_memory < machine_info.memory_size &&
+                machine_state != S5) {
+                try {
+                    VM_AddTask(vm, task_id, prio);
+                    SimOutput("Scheduler::NewTask(): Task " + to_string(task_id) + " added to VM " +
+                              to_string(vm) + " on machine " + to_string(machine), 1);
+                    task_added = true;
 
-    // Check if the task can be assigned to an existing best VM
-
-    // Only one task per VM and Machine so wait until a machine is free, orginal idea
-    // was to split VMs to different cores, but they end up using all the cores 
-    // established by a machine.
-    for (auto it = inactive_machines.begin(); it != inactive_machines.end(); ++it) {
-        MachineId_t machine = *it;
-        // Only remove one instance if the machine CPU type matches the task requirement
-        if (Machine_GetCPUType(machine) == required_cpu) {
-            // Remove this one instance from inactive_machines
-            Machine_SetState(machine, S0);
-            it = inactive_machines.erase(it);
-            active_machines++;
-            VMId_t vm_id = VM_Create(required_vm, required_cpu);
-            vms.push_back(vm_id);
-            VM_Attach(vm_id, machine);
-            VM_AddTask(vm_id, task_id, prio);
-            task_added = true;
-            break;  // Only remove one matching instance
-        } else {
-            SimOutput("Scheduler::NewTask(): Machine " + to_string(machine) +
-                      " is not compatible with task " + to_string(task_id), 4);
+                } catch (const std::exception &e) {
+                    SimOutput("NewTask(): Failed to add task " + to_string(task_id) +
+                              " to VM " + to_string(vm) + ": " + e.what(), 1);
+                }
+                SimOutput("Scheduler::NewTask(): Task " + to_string(task_id) + " assigned to VM " +
+                          to_string(vm) + " on machine " + to_string(machine), 1);
+                break;
+            }
         }
     }
+    
+    // If no new VM could be created (cluster at capacity), try assigning the task to an existing idle VM.
+    if (!task_added) {
+        // Check to see if a Machine at half capcity is available, if its tuned down, turn it on
+        for (MachineId_t machine : machines) {
+            MachineInfo_t machine_info = Machine_GetInfo(machine);
+            if (machine_info.cpu == required_cpu && machine_info.memory_used + required_memory <  machine_info.memory_size) {
+                if (machine_info.s_state == S5) {
+                    Machine_SetState(machine, S0);
+                    active_machines++;
+                }
+                active_machines++;
+                VMId_t vm_id = VM_Create(required_vm, required_cpu);
+                VM_Attach(vm_id, machine);
+                vms.push_back(vm_id);
+                VM_AddTask(vm_id, task_id, prio);
+                task_added = true;
+                break;
+            }
+        }
+    }
+    
+    if (!task_added) {
+        SimOutput("Scheduler::NewTask(): No available capacity for task " +
+                  to_string(task_id), 4);
+    }
 }
-
 void Scheduler::PeriodicCheck(Time_t now) {
     // This method should be called from SchedulerCheck()
     // SchedulerCheck is called periodically by the simulator to allow you to monitor, make decisions, adjustments, etc.
@@ -119,8 +134,7 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Do any bookkeeping necessary for the data structures
     // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
     // This is an opportunity to make any adjustments to optimize performance/energy
-    // Clear the current priority queue
-    // Re-push all VMs so that the queue is sorted by the current active task counts.
+
     // TO DO: if VM can be turned off
     // Check to see if a task can be removed from the VM
 
@@ -131,18 +145,27 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
         if (vm_info.active_tasks.size() == 0) {
             MachineId_t machine_id = vm_info.machine_id;
             VM_Shutdown(vm_id);
-            inactive_machines.push_back(machine_id);
-            active_machines--;
             SimOutput("Scheduler::TaskComplete(): VM " + to_string(vm_id) +
-                      " is removed from machine " + to_string(machine_id), 4);
+                      " is removed from machine " + to_string(machine_id), 1);
             // Remove this VM and move iterator to the next valid element
             it = vms.erase(it);
         } else {
             ++it;
         }
-
-        
     }
+
+    // Check to see if a machine can be turned off
+    for (MachineId_t machine : machines) {
+        MachineInfo_t machine_info = Machine_GetInfo(machine);
+        unsigned active_tasks = machine_info.active_tasks;
+        if (active_tasks == 0 && machine_info.memory_used == 0 &&
+            machine_info.s_state != S5) {
+            Machine_SetState(machine, S5);
+            active_machines--;
+            SimOutput("Scheduler::TaskComplete(): Machine " + to_string(machine) + " is  off at time " + to_string(now), 1);
+        }
+    }
+
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
 }
 

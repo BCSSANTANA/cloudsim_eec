@@ -24,7 +24,6 @@ public:
 private:
     vector<VMId_t> vms; // for algo_spped runner puposes this is also equal to the number of active VMs.
     vector<MachineId_t> machines;
-    vector<MachineId_t> inactive_machines;
 };
 
 
