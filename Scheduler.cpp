@@ -6,58 +6,40 @@
 //
 
 #include "Scheduler.hpp"
-#include <queue>
-#include <vector>
 #include <algorithm>
+#include <vector>
 #include <climits>
+#include <iostream>
 
-static bool migrating = false;
+// Global variables.
+static unsigned total_machines;
 static unsigned active_machines;
-unsigned total_machines;
-
-// Helper structure for sorting machines by energy consumption (lowest first)
-struct MachineEnergyComparator {
-    bool operator()(const MachineId_t &a, const MachineId_t &b) const {
-        return Machine_GetEnergy(a) < Machine_GetEnergy(b);
-    }
-};
-
-// Global sorted list of machines by energy consumption.
-std::vector<MachineId_t> sortedMachines;
 
 void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
-    SimOutput("Scheduler::Init(): Initializing scheduler", 1);
     total_machines = Machine_GetTotal();
     active_machines = total_machines;
     
-    // Build the machines vector and also set up each machine's cores.
+    // Build machines list.
     for (unsigned i = 0; i < total_machines; i++) {
-        MachineInfo_t machine_info = Machine_GetInfo(MachineId_t(i));
-        // not sure this does anything, but might as well
-        for (unsigned k = 0; k < machine_info.num_cpus; k++) {
-            Machine_SetCorePerformance(MachineId_t(i), k, P0);
-        }
-        machines.push_back(MachineId_t(i));
+        MachineId_t m = MachineId_t(i);
+        machines.push_back(m);
     }
     
-    // Sort machines by energy consumption (lowest first)
-    sortedMachines = machines;
-    std::sort(sortedMachines.begin(), sortedMachines.end(), MachineEnergyComparator());
-    
-    // Pre-provision a number of VMs per machine.
-    // Create one VM for every CPU, not sure if that's a good policy but it's a policy
-    for (MachineId_t m : sortedMachines) {
-        MachineInfo_t machine_info = Machine_GetInfo(m);
-        unsigned numVMs = machine_info.num_cpus;
+    // Pre-provision VMs on each machine.
+    for (MachineId_t m : machines) {
+        MachineInfo_t mInfo = Machine_GetInfo(m);
+        // Policy: Create one VM per CPU.
+        unsigned numVMs = mInfo.num_cpus;
         for (unsigned j = 0; j < numVMs; j++) {
-            VMId_t vm = VM_Create(LINUX, machine_info.cpu);
+            VMId_t vm = VM_Create(LINUX, mInfo.cpu);
             vms.push_back(vm);
             VM_Attach(vm, m);
         }
     }
     
-    SimOutput("Scheduler::Init(): Initialized " + to_string(vms.size()) + " VMs across " + to_string(total_machines) + " machines.", 3);
+    SimOutput("Scheduler::Init(): Initialized " + to_string(vms.size()) +
+              " VMs across " + to_string(total_machines) + " machines.", 3);
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
@@ -67,83 +49,88 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 }
 
 //ChatGPT helped fill in the gaps not covered in the class slides
-//Also important to note that our pmapper differs from the class slides because it does not attempt to shutdown any machines since there was no policy mentioned for bringing them back up when needed (and its more interesting to compare the energy use to other algos if its migrating tasks all the time)
+// Scheduler::NewTask
+// For each new workload, scan through all machines (m) in order:
+//   For each machine j, compute:
+//       u = memory_used / memory_size   (current utilization)
+//       v = required_memory / memory_size  (load factor for the task)
+//   If u + v < 1, place workload i in a VM on machine j and break out.
+//   If no machine can accommodate the workload, record an SLA violation.
+// After processing new requests, if any machine has u = 0, turn it off.
+//
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
-    bool taskAssigned = false;
+    bool taskPlaced = false;
     TaskInfo_t taskInfo = GetTaskInfo(task_id);
-    Priority_t prio = (taskInfo.required_sla == SLA0) ? HIGH_PRIORITY :
-                      (taskInfo.required_sla == SLA3) ? LOW_PRIORITY : MID_PRIORITY;
     
-    // pMapper: assign tasks based on machines sorted by energy consumption.
-    // Iterate over sortedMachines to find the first machine that can take the task.
-    for (MachineId_t m : sortedMachines) {
+    // Iterate over machines in the order of sortedMachines.
+    for (MachineId_t m : machines) {
         MachineInfo_t mInfo = Machine_GetInfo(m);
-
-        if (mInfo.cpu != taskInfo.required_cpu)
+        // Skip if the machine's CPU type is incompatible or machine is off.
+        if (mInfo.cpu != taskInfo.required_cpu || mInfo.s_state == S5)
             continue;
-
-        // Skip machines that are not active.
-        if (mInfo.s_state == S5)
-            continue;
-
-        // Check if the machine has enough free memory for this task.
-        if (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory) {
-            // Try to find a VM on this machine with capacity.
+        
+        // Compute current utilization (u) and load factor (v).
+        double u = double(mInfo.memory_used) / mInfo.memory_size;
+        double v = double(taskInfo.required_memory) / mInfo.memory_size;
+        
+        if (u + v < 1.0) {
+            // Try to find an existing VM on machine m.
             bool foundVM = false;
             for (VMId_t vm : vms) {
                 VMInfo_t vmInfo = VM_GetInfo(vm);
-                if (vmInfo.machine_id == m && 
-                    (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory)) {
+                if (vmInfo.machine_id == m) {
                     try {
-                        VM_AddTask(vm, task_id, prio);
-                        taskAssigned = true;
+                        VM_AddTask(vm, task_id, (taskInfo.required_sla == SLA0) ? HIGH_PRIORITY : MID_PRIORITY);
                         foundVM = true;
-                        SimOutput("NewTask(): Assigned task " + to_string(task_id) + " to VM " + to_string(vm) + " on machine " + to_string(m), 1);
+                        taskPlaced = true;
+                        SimOutput("NewTask(): Placed task " + to_string(task_id) +
+                                  " in VM " + to_string(vm) + " on machine " + to_string(m), 1);
                         break;
                     } catch (const std::exception &e) {
-                        // If VM not ready, try next one.
-                        SimOutput("NewTask(): Failed to add task " + to_string(task_id) + " to VM " + to_string(vm) + ": " + e.what(), 1);
+                        SimOutput("NewTask(): Failed to add task " + to_string(task_id) +
+                                  " to VM " + to_string(vm) + ": " + e.what(), 1);
                     }
                 }
             }
-            if (!foundVM) {
-                // No existing VM on machine m can take the task, try to create one if possible.
-                if (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory + VM_MEMORY_OVERHEAD) {
-                    VMId_t new_vm = VM_Create(LINUX, mInfo.cpu);
-                    vms.push_back(new_vm);
-                    VM_Attach(new_vm, m);
-                    try {
-                        VM_AddTask(new_vm, task_id, prio);
-                        taskAssigned = true;
-                        SimOutput("NewTask(): Created new VM " + to_string(new_vm) + " on machine " + to_string(m) + " and assigned task " + to_string(task_id), 1);
-                    } catch (const std::exception &e) {
-                        SimOutput("NewTask(): Failed to add task " + to_string(task_id) + " to new VM: " + e.what(), 1);
-                    }
-                    break; // Exit after trying one machine.
+            // If no VM exists on m, attempt to create a new one if there's capacity.
+            if (!foundVM && (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory + VM_MEMORY_OVERHEAD)) {
+                VMId_t new_vm = VM_Create(LINUX, mInfo.cpu);
+                vms.push_back(new_vm);
+                VM_Attach(new_vm, m);
+                try {
+                    VM_AddTask(new_vm, task_id, (taskInfo.required_sla == SLA0) ? HIGH_PRIORITY : MID_PRIORITY);
+                    taskPlaced = true;
+                    SimOutput("NewTask(): Created new VM " + to_string(new_vm) +
+                              " on machine " + to_string(m) + " and placed task " + to_string(task_id), 1);
+                } catch (const std::exception &e) {
+                    SimOutput("NewTask(): Failed to add task " + to_string(task_id) +
+                              " to new VM: " + e.what(), 1);
                 }
             }
-            if (taskAssigned) break;
+            if (taskPlaced)
+                break; // Task placed; exit loop.
         }
     }
     
-    if (!taskAssigned) {
-        SimOutput("NewTask(): FAILED to assign Task " + to_string(task_id) + " -- SLA violation", 1);
+    if (!taskPlaced) {
+        SimOutput("NewTask(): FAILED to place task " + to_string(task_id) + " -- SLA violation", 1);
     }
 }
 
-
 void Scheduler::PeriodicCheck(Time_t now) {
     // Monitor and log overall machine utilization.
-    double totalUtilization = 0;
+    double totalUtil = 0;
+    unsigned count = 0;
     for (MachineId_t m : machines) {
         MachineInfo_t mInfo = Machine_GetInfo(m);
-        if (mInfo.s_state == S5)
+        if (mInfo.s_state != S0)
             continue;
-        double utilization = double(mInfo.memory_used) / mInfo.memory_size;
-        totalUtilization += utilization;
+        double u = double(mInfo.memory_used) / mInfo.memory_size;
+        totalUtil += u;
+        count++;
     }
-    double avgUtilization = totalUtilization / machines.size();
-    SimOutput("PeriodicCheck(): Average machine utilization: " + to_string(avgUtilization), 3);
+    double avgUtil = (count > 0) ? totalUtil / count : 0;
+    SimOutput("PeriodicCheck(): Average machine utilization: " + to_string(avgUtil), 3);
 }
 
 void Scheduler::Shutdown(Time_t time) {
@@ -158,66 +145,110 @@ void Scheduler::Shutdown(Time_t time) {
     SimOutput("SimulationComplete(): Time is " + to_string(time), 4);
 }
 
-//ChatGPT helped fill in the gaps not covered in the class slides
+// Scheduler::TaskComplete
+// Greedy Allocation on slides had a check for migration every time a task completed but that was slowing things down and I think it's more interesting to compare it this way to the other algo from the slides (pMapper) which we do have migrating workloads after task complete
 void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
-    SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
-    
-    // pMapper rebalancing upon workload completion:
-    // 1. Compute utilization for each machine (utilization = memory_used / memory_size since not really defined)
-    std::vector<std::pair<MachineId_t, double>> machineUtil;
-    for (MachineId_t m : machines) {
-        MachineInfo_t mInfo = Machine_GetInfo(m);
-        if (mInfo.s_state == S5)
-            continue;
-        double utilization = double(mInfo.memory_used) / mInfo.memory_size;
-        machineUtil.push_back(std::make_pair(m, utilization));
+    SimOutput("TaskComplete(): Task " + to_string(task_id) + " completed at time " + to_string(now), 4);
+}
+
+// SLAWarning
+// ChatGPT helped fill in the gaps not covered in the class slides
+// When a workload violates its SLA on a machine J, we:
+//   - Sort all active machines (except J) by utilization (ascending order).
+//   - Compute the load factor v for the violating workload.
+//   - Find a candidate machine that can accommodate v (u + v < 1).
+//   - If found, migrate the workload (via its VM) to that machine; otherwise, log failure.
+// (This just gets called by the one in the public interface, that way we didn't have to copy over vms and machines)
+void Scheduler::SLAViolation(Time_t time, TaskId_t task_id) {
+    TaskInfo_t tInfo = GetTaskInfo(task_id);
+    MachineId_t machineJ = 0;
+    VMId_t vmHosting = 0;
+    // Identify machineJ and the VM hosting workload i.
+    for (VMId_t vm : vms) {
+        VMInfo_t vmInfo = VM_GetInfo(vm);
+        for (TaskId_t t : vmInfo.active_tasks) {
+            if (t == task_id) {
+                machineJ = vmInfo.machine_id;
+                vmHosting = vm;
+                break;
+            }
+        }
+        if (machineJ != 0)
+            break;
+    }
+    if (machineJ == 0) {
+        SimOutput("SLAWarning(): Task " + to_string(task_id) + " not found.", 1);
+        return;
     }
     
-    // 2. Sort machines by utilization
-    std::sort(machineUtil.begin(), machineUtil.end(), [](const auto &a, const auto &b) {
+    // Sort all active machines (except machineJ) by utilization.
+    std::vector<std::pair<MachineId_t, double>> utilList;
+    for (MachineId_t m : machines) {
+        if (m == machineJ)
+            continue;
+        MachineInfo_t mInfo = Machine_GetInfo(m);
+        if (mInfo.s_state != S0)
+            continue;
+        double u = double(mInfo.memory_used) / mInfo.memory_size;
+        utilList.push_back({m, u});
+    }
+    std::sort(utilList.begin(), utilList.end(), [](auto &a, auto &b) {
         return a.second < b.second;
     });
     
-    // Divide machines into two halves:
-    size_t midIndex = machineUtil.size() / 2;
-    std::vector<MachineId_t> lowUtilMachines, highUtilMachines;
-    for (size_t i = 0; i < machineUtil.size(); i++) {
-        if (i < midIndex)
-            lowUtilMachines.push_back(machineUtil[i].first);
-        else
-            highUtilMachines.push_back(machineUtil[i].first);
-    }
+    // Compute load factor v for task_id on machineJ.
+    MachineInfo_t mJInfo = Machine_GetInfo(machineJ);
+    double v = double(tInfo.required_memory) / mJInfo.memory_size;
     
-    // 3. From the least utilized machine, select the smallest workload (by remaining instructions)
-    VMId_t candidateVM = 0;
-    TaskId_t candidateTask = 0;
-    unsigned minWorkload = UINT_MAX;
-    for (MachineId_t m : lowUtilMachines) {
-        for (VMId_t vm : vms) {
-            VMInfo_t vmInfo = VM_GetInfo(vm);
-            if (vmInfo.machine_id == m && !vmInfo.active_tasks.empty()) {
-                for (TaskId_t t : vmInfo.active_tasks) {
-                    TaskInfo_t tInfo = GetTaskInfo(t);
-                    if (tInfo.remaining_instructions < minWorkload) {
-                        minWorkload = tInfo.remaining_instructions;
-                        candidateTask = t;
-                        candidateVM = vm;
-                    }
+    bool migrated = false;
+    for (auto &p : utilList) {
+        MachineId_t candidate = p.first;
+        MachineInfo_t candInfo = Machine_GetInfo(candidate);
+        if (candInfo.s_state != S0)
+            continue;
+        double u_candidate = double(candInfo.memory_used) / candInfo.memory_size;
+        if (u_candidate + v < 1.0) {
+            try {
+                VM_Migrate(vmHosting, candidate);
+                SimOutput("SLAWarning(): Migrated task " + to_string(task_id) +
+                          " from machine " + to_string(machineJ) + " to machine " + to_string(candidate), 1);
+                migrated = true;
+                break;
+            } catch (const std::exception &e) {
+                SimOutput("SLAWarning(): Migration failed for task " + to_string(task_id) +
+                          " to machine " + to_string(candidate) + ": " + e.what(), 1);
+            }
+        }
+    }
+    if (!migrated) {
+        // Attempt standby: look for a machine in S5 with matching CPU type.
+        MachineId_t standbyCandidate = 0;
+        for (MachineId_t m : machines) {
+            MachineInfo_t mInfo = Machine_GetInfo(m);
+            if (mInfo.s_state == S5 && mInfo.cpu == mJInfo.cpu) {
+                standbyCandidate = m;
+                break;
+            }
+        }
+        if (standbyCandidate != 0) {
+            Machine_SetState(standbyCandidate, S0); // Wake up standby machine.
+            MachineInfo_t standbyInfo = Machine_GetInfo(standbyCandidate);
+            double u_standby = double(standbyInfo.memory_used) / standbyInfo.memory_size;
+            if (u_standby + v < 1.0) {
+                try {
+                    VM_Migrate(vmHosting, standbyCandidate);
+                    SimOutput("SLAWarning(): Migrated task " + to_string(task_id) +
+                              " from machine " + to_string(machineJ) + " to standby machine " + to_string(standbyCandidate), 1);
+                    migrated = true;
+                } catch (const std::exception &e) {
+                    SimOutput("SLAWarning(): Migration to standby machine " + to_string(standbyCandidate) +
+                              " failed: " + e.what(), 1);
                 }
             }
         }
     }
-    
-    // 4. Migrate the candidate workload to one of the highly utilized machines to consolidate load (I think this step and the overhead of migration is what's slowing this algo down, but that's pmapper!)
-    if (candidateTask != 0 && !highUtilMachines.empty()) {
-        MachineId_t targetMachine = highUtilMachines.front();
-        try {
-            // Migrate the VM that is hosting candidateTask to the target machine.
-            VM_Migrate(candidateVM, targetMachine);
-            SimOutput("TaskComplete(): Migrated VM " + to_string(candidateVM) + " (carrying task " + to_string(candidateTask) + ") to machine " + to_string(targetMachine), 1);
-        } catch (const std::exception &e) {
-            SimOutput("TaskComplete(): Migration failed: " + string(e.what()), 1);
-        }
+    if (!migrated) {
+        SimOutput("SLAWarning(): FAILED to migrate task " + to_string(task_id) + " after SLA violation", 1);
     }
 }
 
@@ -249,7 +280,6 @@ void MigrationDone(Time_t time, VMId_t vm_id) {
     // The function is called on to alert you that migration is complete
     SimOutput("MigrationDone(): Migration of VM " + to_string(vm_id) + " was completed at time " + to_string(time), 4);
     Scheduler.MigrationComplete(time, vm_id);
-    migrating = false;
 }
 
 void SchedulerCheck(Time_t time) {
@@ -280,7 +310,7 @@ void SimulationComplete(Time_t time) {
 }
 
 void SLAWarning(Time_t time, TaskId_t task_id) {
-    
+    Scheduler.SLAViolation(time, task_id);
 }
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
