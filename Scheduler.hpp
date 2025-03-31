@@ -18,13 +18,13 @@ public:
     void Init();
     void MigrationComplete(Time_t time, VMId_t vm_id);
     void NewTask(Time_t now, TaskId_t task_id);
-    bool Assign_to_VMQueue_top(Time_t now, TaskId_t task_id, Priority_t prio);
     void PeriodicCheck(Time_t now);
     void Shutdown(Time_t now);
     void TaskComplete(Time_t now, TaskId_t task_id);
 private:
-    vector<VMId_t> vms;
+    vector<VMId_t> vms; // for algo_spped runner puposes this is also equal to the number of active VMs.
     vector<MachineId_t> machines;
+    vector<MachineId_t> inactive_machines;
 };
 
 

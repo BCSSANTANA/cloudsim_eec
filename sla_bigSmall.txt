@@ -1,0 +1,6 @@
+SLA violation report
+SLA0: 1.69745%
+SLA1: 51.2195%
+SLA2: 0%
+Total Energy 0.0407542KW-Hour
+Simulation run finished in 45.42 seconds
