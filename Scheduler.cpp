@@ -65,21 +65,18 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             // Check usage in the machine it refers to
             MachineId_t machine = vm_info.machine_id;
             MachineInfo_t machine_info = Machine_GetInfo(machine);
-            MachineState_t machine_state = machine_info.s_state;
             if (machine_info.memory_used  + required_memory < machine_info.memory_size &&
-                machine_state != S5) {
+                machine_info.s_state != S5) {
                 try {
                     VM_AddTask(vm, task_id, prio);
                     SimOutput("Scheduler::NewTask(): Task " + to_string(task_id) + " added to VM " +
-                              to_string(vm) + " on machine " + to_string(machine), 1);
+                              to_string(vm) + " on machine " + to_string(machine), 4);
                     task_added = true;
 
                 } catch (const std::exception &e) {
                     SimOutput("NewTask(): Failed to add task " + to_string(task_id) +
                               " to VM " + to_string(vm) + ": " + e.what(), 1);
                 }
-                SimOutput("Scheduler::NewTask(): Task " + to_string(task_id) + " assigned to VM " +
-                          to_string(vm) + " on machine " + to_string(machine), 1);
                 break;
             }
         }
@@ -91,17 +88,21 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         for (MachineId_t machine : machines) {
             MachineInfo_t machine_info = Machine_GetInfo(machine);
             if (machine_info.cpu == required_cpu && machine_info.memory_used + required_memory <  machine_info.memory_size) {
+                bool just_turned_on = false;
                 if (machine_info.s_state == S5) {
                     Machine_SetState(machine, S0);
-                    active_machines++;
+                    SimOutput("Scheduler::NewTask(): Machine " + to_string(machine) + " is turned on at time " + to_string(now), 1);
+                    just_turned_on = true;
                 }
-                active_machines++;
+               // Put in a queue 
+               if (!just_turned_on) {
                 VMId_t vm_id = VM_Create(required_vm, required_cpu);
                 VM_Attach(vm_id, machine);
                 vms.push_back(vm_id);
                 VM_AddTask(vm_id, task_id, prio);
                 task_added = true;
                 break;
+               }
             }
         }
     }
@@ -116,6 +117,7 @@ void Scheduler::PeriodicCheck(Time_t now) {
     // SchedulerCheck is called periodically by the simulator to allow you to monitor, make decisions, adjustments, etc.
     // Unlike the other invocations of the scheduler, this one doesn't report any specific event
     // Recommendation: Take advantage of this function to do some monitoring and adjustments as necessary
+
 }
 
 void Scheduler::Shutdown(Time_t time) {
@@ -139,6 +141,7 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Check to see if a task can be removed from the VM
 
     // Policy free VM and power down the machine
+    static unsigned count = 0;
     for (auto it = vms.begin(); it != vms.end(); ) {
         VMId_t vm_id = *it;
         VMInfo_t vm_info = VM_GetInfo(vm_id);
@@ -155,14 +158,15 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     }
 
     // Check to see if a machine can be turned off
-    for (MachineId_t machine : machines) {
-        MachineInfo_t machine_info = Machine_GetInfo(machine);
-        unsigned active_tasks = machine_info.active_tasks;
-        if (active_tasks == 0 && machine_info.memory_used == 0 &&
-            machine_info.s_state != S5) {
-            Machine_SetState(machine, S5);
-            active_machines--;
-            SimOutput("Scheduler::TaskComplete(): Machine " + to_string(machine) + " is  off at time " + to_string(now), 1);
+    if (count == (total_machines / 2)) {
+        for (MachineId_t machine : machines) {
+            MachineInfo_t machine_info = Machine_GetInfo(machine);
+            unsigned active_tasks = machine_info.active_tasks;
+            if (active_tasks == 0 && machine_info.memory_used == 0 &&
+                machine_info.s_state != S5) {
+                Machine_SetState(machine, S5);
+                SimOutput("Scheduler::TaskComplete(): Machine " + to_string(machine) + " is  off at time " + to_string(now), 1);
+            }
         }
     }
 
@@ -229,5 +233,14 @@ void SLAWarning(Time_t time, TaskId_t task_id) {
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
     // Called in response to an earlier request to change the state of a machine
+    MachineInfo_t machine_info = Machine_GetInfo(machine_id);
+    if (machine_info.s_state == S5) {
+        active_machines--;
+        SimOutput("StateChangeComplete(): Machine " + to_string(machine_id) + " is off at time " + to_string(time), 1);
+    }
+    else if (machine_info.s_state == S0) {
+        active_machines++;
+        SimOutput("StateChangeComplete(): Machine " + to_string(machine_id) + " is on at time " + to_string(time), 1);
+    }
 }
 
