@@ -128,25 +128,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         vmQueue.push(vm);
     }
     //make a prio queue of VMs based on number of active tasks
-    if (!vmQueue.empty()) {
-        // The top of the queue is the least busy VM.
-        VMId_t bestVM = vmQueue.top();
-        try {
-            VMInfo_t vm_info = VM_GetInfo(bestVM);
-            MachineInfo_t machine_info = Machine_GetInfo(Machine_GetInfo(vm_info.machine_id).machine_id);
-            if (machine_info.s_state == S5) {
-                Machine_SetState(machine_info.machine_id, S0);
-                active_machines++;
-                SimOutput("Scheduler::NewTask(): Machine " + to_string(machine_info.machine_id) + " is turned on at time " + to_string(now), 4);
-            }
-            VM_AddTask(bestVM, task_id, prio);
-            taskAssigned = true;
-            SimOutput("Added task " + to_string(task_id) + " to existing VM ", 1);
-        } catch (const std::exception &e) {
-            SimOutput("Failed to add task " + to_string(task_id) + " to VM " +
-                      to_string(bestVM) + ": " + e.what(), 1);
-        }
-    }
+    taskAssigned = Assign_to_VMQueue_top(now, task_id, prio);
     if (!taskAssigned) {
         MachineId_t least_full_machine;
         unsigned lowest_used_mem;
@@ -168,6 +150,30 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             }
         }
     }
+}
+
+bool Scheduler::Assign_to_VMQueue_top(Time_t now, TaskId_t task_id, Priority_t prio){
+    bool taskAssigned = false;
+    if (!vmQueue.empty()){
+        // The top of the queue is the least busy VM.
+        VMId_t bestVM = vmQueue.top();
+        try {
+            VMInfo_t vm_info = VM_GetInfo(bestVM);
+            MachineInfo_t machine_info = Machine_GetInfo(Machine_GetInfo(vm_info.machine_id).machine_id);
+            if (machine_info.s_state == S5) {
+                Machine_SetState(machine_info.machine_id, S0);
+                active_machines++;
+                SimOutput("Scheduler::NewTask(): Machine " + to_string(machine_info.machine_id) + " is turned on at time " + to_string(now), 4);
+            }
+            VM_AddTask(bestVM, task_id, prio);
+            taskAssigned = true;
+            SimOutput("Added task " + to_string(task_id) + " to existing VM ", 1);
+        } catch (const std::exception &e){
+            SimOutput("Failed to add task " + to_string(task_id) + " to VM " +
+                          to_string(bestVM) + ": " + e.what(), 1);
+        }
+    }
+    return taskAssigned;
 }
 
 void Scheduler::PeriodicCheck(Time_t now) {
@@ -200,15 +206,15 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Re-push all VMs so that the queue is sorted by the current active task counts.
     for (VMId_t vm : vms) {
         vmQueue.push(vm);
-        
     }
+    // TO DO: if VM can be turned off
     for (MachineId_t machine : machines) {
         MachineInfo_t machine_info = Machine_GetInfo(machine);
-        unsigned active_tasks = machine_info.active_tasks;
-        if (active_tasks == 0) {
+        if (machine_info.active_tasks == 0 && machine_info.memory_used == 0) {
+            SimOutput("Scheduler::PeriodicCheck(): Starting to turn off Machine " + to_string(machine) + " at time " + to_string(now), 4);
             Machine_SetState(machine, S5);
             active_machines--;
-            SimOutput("Scheduler::PeriodicCheck(): Machine " + to_string(machine) + " is turnedmachine_get off at time " + to_string(now), 4);
+            SimOutput("Scheduler::PeriodicCheck(): Machine " + to_string(machine) + " is turned off at time " + to_string(now), 4);
         }
     }
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
