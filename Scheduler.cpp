@@ -232,7 +232,7 @@ void SLAWarning(Time_t time, TaskId_t task_id) {
 }
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
-    // Called in response to an earlier request to change the state of a machine
+    // Called in response to an earlier request to change the state of a machine.
     MachineInfo_t machine_info = Machine_GetInfo(machine_id);
     if (machine_info.s_state == S5) {
         active_machines--;
