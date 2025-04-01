@@ -81,7 +81,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         }
     }
     
-    // If try to create a VM from a Machine.
+    // If not added try to create a VM from a Machine.
     if (!task_added) {
         for (MachineId_t machine : machines) {
             MachineInfo_t machine_info = Machine_GetInfo(machine);
