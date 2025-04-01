@@ -34,6 +34,10 @@ void Scheduler::Init() {
     // Build the machines vector and also set up each machine's cores.
     for (unsigned i = 0; i < total_machines; i++) {
         MachineInfo_t machine_info = Machine_GetInfo(MachineId_t(i));
+        // not sure this does anything, but might as well
+        for (unsigned k = 0; k < machine_info.num_cpus; k++) {
+            Machine_SetCorePerformance(MachineId_t(i), k, P0);
+        }
         machines.push_back(MachineId_t(i));
     }
     
@@ -63,7 +67,7 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 }
 
 //ChatGPT helped fill in the gaps not covered in the class slides
-//Also important to note that our pmapper differs from the class slides because it does not attempt to shutdown any machines since there was no policy mentioned for bringing them back up when needed (and its more interesting to compare the energy use to other algos if its migrating tasks all the time), furthermore to differentiate it from other algos for comparison we elect to try and make a new VM for each task first THEN assign tasks to an existing VM once the max number of VMs have been created.
+//Also important to note that our pmapper differs from the class slides because it does not attempt to shutdown any machines since there was no policy mentioned for bringing them back up when needed (and its more interesting to compare the energy use to other algos if its migrating tasks all the time)
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     bool taskAssigned = false;
     TaskInfo_t taskInfo = GetTaskInfo(task_id);
@@ -83,18 +87,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             continue;
 
         // Check if the machine has enough free memory for this task.
-        if (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory + 100) {
-            VMId_t new_vm = VM_Create(LINUX, mInfo.cpu);
-                    vms.push_back(new_vm);
-                    VM_Attach(new_vm, m);
-                    try {
-                        VM_AddTask(new_vm, task_id, prio);
-                        taskAssigned = true;
-                        SimOutput("NewTask(): Created new VM " + to_string(new_vm) + " on machine " + to_string(m) + " and assigned task " + to_string(task_id), 1);
-                        break;
-                    } catch (const std::exception &e) {
-                        SimOutput("NewTask(): Failed to add task " + to_string(task_id) + " to new VM: " + e.what(), 1);
-                    }
+        if (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory) {
             // Try to find a VM on this machine with capacity.
             bool foundVM = false;
             for (VMId_t vm : vms) {
@@ -115,7 +108,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             }
             if (!foundVM) {
                 // No existing VM on machine m can take the task, try to create one if possible.
-                if (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory + 10) {
+                if (mInfo.memory_size - mInfo.memory_used >= taskInfo.required_memory + VM_MEMORY_OVERHEAD) {
                     VMId_t new_vm = VM_Create(LINUX, mInfo.cpu);
                     vms.push_back(new_vm);
                     VM_Attach(new_vm, m);
