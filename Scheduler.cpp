@@ -119,7 +119,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             if (Machine_GetInfo(machine).cpu != taskInfo.required_cpu)
                 continue;
             if (has_gpu) {
-                while (VM_GetInfo(vmQueue.top()).machine_id != machine) {
+                while (Machine_GetInfo(machine).memory_size - Machine_GetInfo(machine).memory_used < taskInfo.required_memory + VM_MEMORY_OVERHEAD || VM_GetInfo(vmQueue.top()).machine_id != machine) {
                     vmQueue.pop();
                 }
                 VMId_t gpuVM = vmQueue.top();
@@ -138,7 +138,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     //make a prio queue of VMs based on number of active tasks
     if (!vmQueue.empty() && !taskAssigned) {
         // The top of the queue is the least busy VM.
-        while (Machine_GetCPUType(VM_GetInfo(vmQueue.top()).machine_id) != taskInfo.required_cpu) {
+        while (Machine_GetInfo(VM_GetInfo(vmQueue.top()).machine_id).cpu != taskInfo.required_cpu || Machine_GetInfo(VM_GetInfo(vmQueue.top()).machine_id).memory_size - Machine_GetInfo(VM_GetInfo(vmQueue.top()).machine_id).memory_used < taskInfo.required_memory + VM_MEMORY_OVERHEAD) {
             vmQueue.pop();
         }
         VMId_t bestVM = vmQueue.top();
@@ -155,7 +155,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         MachineId_t least_full_machine;
         unsigned lowest_used_mem;
         for (MachineId_t machine : machines) {
-            if (Machine_GetInfo(machine).cpu != taskInfo.required_cpu || Machine_GetInfo(machine).memory_size - Machine_GetInfo(machine).memory_used > 100)
+            if (Machine_GetInfo(machine).cpu != taskInfo.required_cpu || Machine_GetInfo(machine).memory_size - Machine_GetInfo(machine).memory_used < taskInfo.required_memory + VM_MEMORY_OVERHEAD)
                 continue;
             unsigned used_mem = Machine_GetInfo(machine).active_vms;
             if (used_mem < lowest_used_mem) {
@@ -163,8 +163,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
                 lowest_used_mem = used_mem;
             }
         }
-        //100 just an arbitrary number to make sure we have room to make new VM and still take in tasks
-        if (Machine_GetInfo(least_full_machine).memory_size - Machine_GetInfo(least_full_machine).memory_used > 10 && Machine_GetInfo(least_full_machine).cpu == required_cpuType) {
+        if (Machine_GetInfo(least_full_machine).cpu == required_cpuType) {
             VMId_t new_vm = VM_Create(LINUX, required_cpuType);
             vms.push_back(new_vm);
             VM_Attach(new_vm, least_full_machine);
