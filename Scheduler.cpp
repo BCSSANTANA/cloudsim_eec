@@ -58,11 +58,10 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     unsigned required_memory = taskInfo.required_memory;
     bool task_added = false;
     
-    // Iterate and find a matching VM and Machine.
+    // Iterate and find to add a VM to add this task.
     for (VMId_t vm : vms) {
         VMInfo_t vm_info = VM_GetInfo(vm);
         if (vm_info.vm_type == required_vm && vm_info.cpu == required_cpu) {
-            // Check usage in the machine it refers to
             MachineId_t machine = vm_info.machine_id;
             MachineInfo_t machine_info = Machine_GetInfo(machine);
             if (machine_info.memory_used  + required_memory < machine_info.memory_size &&
@@ -82,19 +81,18 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         }
     }
     
-    // If no new VM could be created (cluster at capacity), try assigning the task to an existing idle VM.
+    // If try to create a VM from a Machine.
     if (!task_added) {
-        // Check to see if a Machine at half capcity is available, if its tuned down, turn it on
         for (MachineId_t machine : machines) {
             MachineInfo_t machine_info = Machine_GetInfo(machine);
             if (machine_info.cpu == required_cpu && machine_info.memory_used + required_memory <  machine_info.memory_size) {
                 bool just_turned_on = false;
+                // If Machine is off, turn it on. Takes a while to chage state, so look for another machine.
                 if (machine_info.s_state == S5) {
                     Machine_SetState(machine, S0);
                     SimOutput("Scheduler::NewTask(): Machine " + to_string(machine) + " is turned on at time " + to_string(now), 1);
                     just_turned_on = true;
                 }
-               // Put in a queue 
                if (!just_turned_on) {
                 VMId_t vm_id = VM_Create(required_vm, required_cpu);
                 VM_Attach(vm_id, machine);
@@ -136,11 +134,8 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Do any bookkeeping necessary for the data structures
     // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
     // This is an opportunity to make any adjustments to optimize performance/energy
-
-    // TO DO: if VM can be turned off
-    // Check to see if a task can be removed from the VM
-
-    // Policy free VM and power down the machine
+    
+    // Policy: free VMs with no tasks.
     static unsigned count = 0;
     for (auto it = vms.begin(); it != vms.end(); ) {
         VMId_t vm_id = *it;
@@ -150,14 +145,14 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
             VM_Shutdown(vm_id);
             SimOutput("Scheduler::TaskComplete(): VM " + to_string(vm_id) +
                       " is removed from machine " + to_string(machine_id), 1);
-            // Remove this VM and move iterator to the next valid element
             it = vms.erase(it);
         } else {
             ++it;
         }
     }
 
-    // Check to see if a machine can be turned off
+    // Policy: Check to see if a machine can be turned off, after a certain number of tasks
+    // have been completed.
     if (count == (total_machines / 2)) {
         for (MachineId_t machine : machines) {
             MachineInfo_t machine_info = Machine_GetInfo(machine);
