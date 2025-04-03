@@ -85,7 +85,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             MachineInfo_t machine_info = Machine_GetInfo(machine);
             if (machine_info.cpu == required_cpu && machine_info.memory_used + required_memory <  machine_info.memory_size) {
                 bool just_turned_on = false;
-                // If Machine is off, turn it on. Takes a while to chage state, so look for another machine.
+                // If Machine is off, turn it on. Takes a while to chage state, so look for another machine
                 if (machine_info.s_state == S5) {
                     Machine_SetState(machine, S0);
                     SimOutput("Scheduler::NewTask(): Machine " + to_string(machine) + " is turned on at time " + to_string(now), 1);
