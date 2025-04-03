@@ -58,7 +58,6 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     unsigned required_memory = taskInfo.required_memory;
     bool task_added = false;
     
-    // Iterate and find to add a VM to add this task.
     for (VMId_t vm : vms) {
         VMInfo_t vm_info = VM_GetInfo(vm);
         if (vm_info.vm_type == required_vm && vm_info.cpu == required_cpu) {
@@ -81,7 +80,6 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         }
     }
     
-    // If not added try to create a VM from a Machine.
     if (!task_added) {
         for (MachineId_t machine : machines) {
             MachineInfo_t machine_info = Machine_GetInfo(machine);
@@ -134,8 +132,11 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Do any bookkeeping necessary for the data structures
     // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
     // This is an opportunity to make any adjustments to optimize performance/energy
-    
-    // Policy: free VMs with no tasks.
+
+    // TO DO: if VM can be turned off
+    // Check to see if a task can be removed from the VM
+
+    // Policy free VM and power down the machine
     static unsigned count = 0;
     for (auto it = vms.begin(); it != vms.end(); ) {
         VMId_t vm_id = *it;
@@ -145,14 +146,14 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
             VM_Shutdown(vm_id);
             SimOutput("Scheduler::TaskComplete(): VM " + to_string(vm_id) +
                       " is removed from machine " + to_string(machine_id), 1);
+            // Remove this VM and move iterator to the next valid element
             it = vms.erase(it);
         } else {
             ++it;
         }
     }
 
-    // Policy: Check to see if a machine can be turned off, after a certain number of tasks
-    // have been completed.
+    // Check to see if a machine can be turned off
     if (count == (total_machines / 2)) {
         for (MachineId_t machine : machines) {
             MachineInfo_t machine_info = Machine_GetInfo(machine);
@@ -238,4 +239,3 @@ void StateChangeComplete(Time_t time, MachineId_t machine_id) {
         SimOutput("StateChangeComplete(): Machine " + to_string(machine_id) + " is on at time " + to_string(time), 1);
     }
 }
-
